@@ -1,4 +1,3 @@
-[script (1).sh](https://github.com/user-attachments/files/33148657/script.1.sh)
 #!/usr/bin/env bash
 # =============================================================================
 # script.sh - Brodie Robertson's i3 setup on Arch Linux
