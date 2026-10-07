@@ -25,6 +25,7 @@
 #   WEATHER_LOC="Fort+Wayne" ./script.sh   # city for the polybar weather module
 #
 # Inside i3, press Super+F1 to see every keybinding (Enter runs the selected one).
+# Or just RIGHT-CLICK: on the desktop, on the bar, or on a window's title bar.
 #
 # Run as your normal user, NOT root. Every file it replaces is backed up first.
 # =============================================================================
@@ -71,7 +72,8 @@ PKG_CORE=(base-devel git curl wget unzip rsync python python-pipx lua ruby perl 
 PKG_I3=(i3-wm polybar picom dunst libnotify feh betterlockscreen maim brightnessctl
   networkmanager network-manager-applet udiskie pacman-contrib lm_sensors sysstat
   pipewire pipewire-pulse pipewire-alsa wireplumber pavucontrol pulsemixer alsa-utils
-  playerctl xdg-utils xdg-user-dirs qt5ct lxappearance imwheel flameshot rofi)
+  playerctl xdg-utils xdg-user-dirs qt5ct lxappearance imwheel flameshot rofi
+  jgmenu xclickroot)
 PKG_RANGER=(ranger w3m python-pillow highlight atool p7zip unrar libarchive mediainfo
   poppler ffmpegthumbnailer perl-image-exiftool odt2txt imagemagick python-chardet)
 PKG_CLI=(neovim nodejs npm fzf ripgrep eza trash-cli htop btop neofetch fastfetch
@@ -118,6 +120,14 @@ if [[ $SKIP_PKGS -eq 0 ]]; then
                "${PKG_MEDIA[@]}" "${PKG_FONTS[@]}" "${PKG_GUI[@]}"
   if [[ $HEAVY -eq 1 ]] && confirm "Also install the big apps his i3 keybinds open (GIMP, OBS, Kdenlive, Blender, VSCodium, Brave, Thunderbird, Discord, Spotify, Joplin)?"; then
     install_pkgs "${PKG_HEAVY[@]}"
+  fi
+  if ! command -v xclickroot >/dev/null; then
+    log "Building xclickroot (right-click on the desktop) from source..."
+    tmp=$(mktemp -d)
+    if git clone -q --depth 1 https://github.com/phillbush/xclickroot "$tmp/xclickroot"; then
+      (cd "$tmp/xclickroot" && make && sudo make install) || warn "xclickroot failed to build; desktop right-click won't work (bar and title bars still will)."
+    fi
+    rm -rf "$tmp"
   fi
   sudo systemctl enable --now NetworkManager.service 2>/dev/null || true
   sudo pkgfile --update >/dev/null 2>&1 || true
@@ -278,6 +288,15 @@ cat >> "$I3" <<'EOF'
 
 ###---Keybinding cheat sheet---###
 bindsym $mod+F1 exec --no-startup-id i3keys
+
+###---Right-click menu---###
+# Right-click the empty desktop
+exec --no-startup-id xclickroot -r rightmenu
+# Right-click a window's title bar or border (picks that window first)
+bindsym --release --border button3 focus; exec --no-startup-id rightmenu
+# Keyboard: the menu key, or Super+Escape
+bindsym Menu exec --no-startup-id rightmenu
+bindsym $mod+Escape exec --no-startup-id rightmenu
 EOF
 
 # Programs: Ubuntu/snap-era launchers -> Arch equivalents; lf -> ranger
@@ -305,6 +324,9 @@ sed -i -e 's#^monitor = \${env:MONITOR:DisplayPort-0}#monitor = ${env:MONITOR:}#
 sed -i -e '/^tray-position = /d' -e '/^tray-padding = /d' -e '/^tray-background = /d' \
        -e '/^tray-offset-[xy] = /d' -e '/^tray-scale = /d' "$PB"
 sed -i 's#^\(modules-right = .*time\)$#\1 tray#' "$PB"
+# Menu button on the left, and right-click on any empty part of the bar
+sed -i 's#^modules-left = i3 xwindow#modules-left = menu i3 xwindow#' "$PB"
+sed -i 's#^\(cursor-scroll = .*\)$#\1\nclick-right = rightmenu \&#' "$PB"
 
 # pacman module ran 'sudo pacman -Qu' (asks for a password the bar can't give) -> checkupdates
 awk -v loc="$WEATHER_LOC" '
@@ -351,6 +373,14 @@ format-padding =
 
 ; Separator in between workspaces
 label-separator = |
+
+[module/menu]
+type = custom/text
+format = " ☰ "
+format-background = ${colors.background-wm}
+format-underline = ${colors.primary}
+click-left = rightmenu &
+click-right = rightmenu &
 
 [module/tray]
 type = internal/tray
@@ -480,6 +510,149 @@ cmd=$(awk -v want="$key" '
   }' "$cfg")
 [ -n "$cmd" ] && i3-msg "$cmd" >/dev/null
 I3KEYS
+
+# Right-click menu (desktop / bar / title bars): everything the shortcuts do
+cat > "$SCR/rightmenu" <<'RIGHTMENU'
+#!/bin/sh
+# rightmenu - right-click menu for i3 (desktop, polybar, window title bars)
+# Only lists apps that are installed. Menu look: ~/.config/jgmenu/jgmenurc
+
+has() { command -v "$1" >/dev/null 2>&1; }
+term="${TERMINAL:-st}"
+app() {   # app <label> <binary> <command...>
+  label="$1"; bin="$2"; shift 2
+  has "$bin" && printf '%s,%s\n' "$label" "$*"
+}
+
+menu() {
+cat <<EOF
+Terminal,$term
+Run program...,dmenu_run
+^sep()
+Apps,^checkout(apps)
+Files,^checkout(files)
+Window,^checkout(window)
+Workspaces,^checkout(workspaces)
+Sound,^checkout(sound)
+Screenshot,^checkout(shot)
+^sep()
+Web search...,sch "${BROWSER:-firefox}"
+Update system,updatepackages
+Keyboard shortcuts...,i3keys
+^sep()
+System,^checkout(system)
+EOF
+
+echo '^tag(apps)'
+app "Firefox"          firefox     firefox
+app "Brave"            brave       brave
+app "Neovim"           nvim        "$term -e nvim"
+app "VSCodium"         vscodium    vscodium
+app "GIMP"             gimp        gimp
+app "OBS Studio"       obs         obs
+app "Kdenlive"         kdenlive    kdenlive
+app "Blender"          blender     blender
+app "Discord"          discord     discord
+app "Spotify"          spotify-launcher spotify-launcher
+app "Thunderbird"      thunderbird thunderbird
+app "Music (ncmpcpp)"  ncmpcpp     "$term -e ncmpcpp"
+app "Calendar"         calcurse    "$term -e calcurse"
+app "RSS (newsboat)"   newsboat    "$term -e newsboat"
+app "Torrents (tremc)" tremc       "$term -e tremc"
+app "System monitor"   htop        "$term -e htop"
+app "Tabbed terminal"  tabbed      stabmux
+
+echo '^tag(files)'
+app "Ranger"           ranger      "$term -e ranger"
+app "PCManFM"          pcmanfm     pcmanfm
+echo "Home folder,xdg-open $HOME"
+echo "Screenshots folder,xdg-open $HOME/pictures/screenshots"
+
+cat <<'EOF'
+^tag(window)
+Close window,i3-msg kill
+Float / tile,i3-msg floating toggle
+Fullscreen,i3-msg fullscreen toggle
+^sep()
+Layout: tabbed,i3-msg layout tabbed
+Layout: stacked,i3-msg layout stacking
+Layout: split,i3-msg layout toggle split
+Split next window side by side,i3-msg split h
+Split next window below,i3-msg split v
+Resize mode (Esc to leave),i3-msg mode resize
+^sep()
+Send to workspace,^checkout(sendto)
+EOF
+
+echo '^tag(sendto)'
+for n in 1 2 3 4 5 6 7 8 9 10; do
+  echo "Workspace $n,i3-msg \"move container to workspace number $n; workspace number $n\""
+done
+
+echo '^tag(workspaces)'
+for n in 1 2 3 4 5 6 7 8 9 10; do
+  echo "Workspace $n,i3-msg workspace number $n"
+done
+
+cat <<'EOF'
+^tag(sound)
+Volume up,pulsevolctrl output-vol @DEFAULT_SINK@ +5%
+Volume down,pulsevolctrl output-vol @DEFAULT_SINK@ -5%
+Mute / unmute,pulsevolctrl output-mute @DEFAULT_SINK@
+Mixer,${TERMINAL:-st} -e pulsemixer
+Play / pause,playerctl play-pause
+Next track,playerctl next
+Previous track,playerctl previous
+^tag(shot)
+Whole screen,screenshot full
+Select area,screenshot select
+Whole screen after delay,screenshot fulltime
+Area after delay,screenshot selecttime
+^tag(system)
+EOF
+[ -x "$HOME/.local/bin/vmdisplay" ] && echo "Fit screen to window,$HOME/.local/bin/vmdisplay fit"
+cat <<'EOF'
+Lock screen,betterlockscreen -l
+Reload i3 config,i3-msg reload
+Restart i3,i3-msg restart
+^sep()
+Log out,prompt "Log out of i3?" "i3-msg exit"
+Reboot,prompt "Reboot?" "systemctl reboot"
+Shut down,prompt "Shut down?" "systemctl poweroff"
+EOF
+}
+
+# a second right-click while the menu is open just closes it
+pkill -x jgmenu && exit 0
+menu | jgmenu --simple --at-pointer --config-file="$HOME/.config/jgmenu/jgmenurc"
+RIGHTMENU
+
+mkdir -p "$DOT/config/jgmenu"
+cat > "$DOT/config/jgmenu/jgmenurc" <<'JGMENURC'
+# Right-click menu, in Brodie's colours (from his .Xresources)
+stay_alive          = 0
+position_mode       = pointer
+menu_width          = 230
+menu_padding_top    = 6
+menu_padding_right  = 6
+menu_padding_bottom = 6
+menu_padding_left   = 6
+menu_border         = 2
+menu_radius         = 0
+item_height         = 26
+item_padding_x      = 8
+sep_height          = 5
+font                = JetBrains Mono 10
+arrow_string        = ›
+sub_hover_action    = 1
+color_menu_bg       = #1d1f21 100
+color_menu_border   = #327bd1 100
+color_norm_bg       = #1d1f21 0
+color_norm_fg       = #d8dee9 100
+color_sel_bg        = #327bd1 100
+color_sel_fg        = #ffffff 100
+color_sep_fg        = #444444 100
+JGMENURC
 
 # Search menu ($mod+s) needs a list of engines, which isn't in the repo
 mkdir -p "$DOT/config/search"
@@ -701,6 +874,7 @@ fi
 echo
 log "Done.  WM: i3   Bar: his polybar   Terminal: st   Files: ranger   Prompt: purple powerline"
 echo "  Keyboard                  : ${KB_LAYOUT} layout.  Super+F1 inside i3 lists every keybinding."
+echo "  Mouse                     : right-click the desktop, the bar or a title bar for the menu."
 echo "  Backups of replaced files : ${BACKUP}"
 [[ ${#MISSING_PKGS[@]} -gt 0 ]] && echo "  Not found in repo/AUR     : ${MISSING_PKGS[*]}"
 [[ ${#FAILED_PKGS[@]}  -gt 0 ]] && echo "  Failed to install         : ${FAILED_PKGS[*]}"
