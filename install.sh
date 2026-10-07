@@ -21,7 +21,10 @@
 #   ./script.sh -y                   # no confirmation prompts
 #   ./script.sh --no-heavy-apps      # skip GIMP/OBS/Kdenlive/Blender/VSCodium/Brave/...
 #   ./script.sh --no-packages        # only apply configs (no pacman/yay, no builds)
+#   ./script.sh --layout gb          # keyboard layout (default: us)
 #   WEATHER_LOC="Fort+Wayne" ./script.sh   # city for the polybar weather module
+#
+# Inside i3, press Super+F1 to see every keybinding (Enter runs the selected one).
 #
 # Run as your normal user, NOT root. Every file it replaces is backed up first.
 # =============================================================================
@@ -29,13 +32,14 @@ set -euo pipefail
 
 # ---------- options -----------------------------------------------------------
 ZIPDIR=""; ASSUME_YES=0; SKIP_PKGS=0; HEAVY=1
-WEATHER_LOC="${WEATHER_LOC:-}"
+WEATHER_LOC="${WEATHER_LOC:-}"; KB_LAYOUT="us"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --zips)          ZIPDIR="$2"; shift 2 ;;
     -y|--yes)        ASSUME_YES=1; shift ;;
     --no-packages)   SKIP_PKGS=1; shift ;;
     --no-heavy-apps) HEAVY=0; shift ;;
+    --layout)        KB_LAYOUT="$2"; shift 2 ;;
     -h|--help)       sed -n '2,28p' "$0"; exit 0 ;;
     *) echo "Unknown option: $1  (try --help)" >&2; exit 1 ;;
   esac
@@ -62,7 +66,7 @@ fi
 PKG_CORE=(base-devel git curl wget unzip rsync python python-pipx lua ruby perl jq bc
   zsh zsh-syntax-highlighting zsh-you-should-use pkgfile
   xorg-server xorg-xinit xorg-xsetroot xorg-xset xorg-xrdb xorg-xrandr xorg-xprop
-  xorg-xwininfo xorg-xev xorg-xinput xorg-xmodmap xclip xsel xdotool
+  xorg-xwininfo xorg-xev xorg-xinput xorg-xmodmap xorg-setxkbmap xclip xsel xdotool
   libx11 libxft libxinerama fontconfig freetype2)
 PKG_I3=(i3-wm polybar picom dunst libnotify feh betterlockscreen maim brightnessctl
   networkmanager network-manager-applet udiskie pacman-contrib lm_sensors sysstat
@@ -118,6 +122,9 @@ if [[ $SKIP_PKGS -eq 0 ]]; then
   sudo systemctl enable --now NetworkManager.service 2>/dev/null || true
   sudo pkgfile --update >/dev/null 2>&1 || true
   sudo sensors-detect --auto >/dev/null 2>&1 || true
+  # keyboard layout for X and the text console
+  sudo localectl set-x11-keymap "$KB_LAYOUT" 2>/dev/null || warn "Could not set the X keyboard layout to $KB_LAYOUT."
+  sudo localectl set-keymap "$KB_LAYOUT" 2>/dev/null || true
 fi
 
 # ---------- 2. get the four repos --------------------------------------------
@@ -259,6 +266,19 @@ sed -i -e 's#exec scrnshot #exec --no-startup-id screenshot #' -e 's#exec toggle
 for s in mntandroid importandroid devenv timer openterminalin 'bm "firefox"' multimonitor; do
   sed -i "s#^\(bindsym [^ ]* exec ${s}\)\$#\# \1   (script or a helper it needs is not in his public repo)#" "$I3"
 done
+
+# His standard i3 layout keys were commented out "for testing" -> on (none clash)
+sed -i -e 's|^#\(bindsym \$mod+Shift+s layout stacking\)|\1|' \
+       -e 's|^#\(bindsym \$mod+Shift+t layout tabbed\)|\1|' \
+       -e 's|^#\(bindsym \$mod+Shift+i layout toggle split\)|\1|' \
+       -e 's|^#\(bindsym \$mod+Shift+space floating toggle\)|\1|' \
+       -e 's|^#\(bindsym \$mod+space focus mode_toggle\)|\1|' "$I3"
+sed -i 's|^# Here for testing$|# Layouts and floating windows|' "$I3"
+cat >> "$I3" <<'EOF'
+
+###---Keybinding cheat sheet---###
+bindsym $mod+F1 exec --no-startup-id i3keys
+EOF
 
 # Programs: Ubuntu/snap-era launchers -> Arch equivalents; lf -> ranger
 sed -i -e 's#exec snap run spotify#exec spotify-launcher#' \
@@ -414,6 +434,53 @@ cat > "$SCR/updatepackages" <<'EOF'
 ${TERMINAL:-st} -e sh -c 'sudo pacman -Syu; printf "\nDone - press Enter to close "; read -r _'
 EOF
 
+# Super+F1: list every i3 keybinding in dmenu; Enter runs the one you pick
+cat > "$SCR/i3keys" <<'I3KEYS'
+#!/bin/sh
+# i3keys - list every i3 keybinding in dmenu (Super+F1); pick one to run it.
+cfg="${1:-$HOME/.config/i3/config}"
+[ -f "$cfg" ] || { notify-send "i3keys" "No i3 config at $cfg"; exit 1; }
+
+list=$(awk '
+  function pretty(k) {
+    gsub(/\$mod/, "Super", k); gsub(/Mod1/, "Alt", k); gsub(/Mod4/, "Super", k)
+    gsub(/[Cc]ontrol/, "Ctrl", k); gsub(/shift/, "Shift", k); gsub(/control/, "Ctrl", k)
+    return k
+  }
+  /^[ \t]*mode "/        { m = $2; gsub(/"/, "", m); d = ""; next }
+  /^[ \t]*}/             { m = ""; d = ""; next }
+  /^[ \t]*#[ \t]*(bindsym|exec|set|bar|font)/ { next }
+  /^[ \t]*#/             { d = $0; sub(/^[ \t]*#+[- ]*/, "", d); sub(/[- #]*$/, "", d); next }
+  /^[ \t]*bindsym /      {
+    key = pretty($2)
+    cmd = $0; sub(/^[ \t]*bindsym[ \t]+[^ \t]+[ \t]+/, "", cmd)
+    shown = cmd; sub(/^exec (--no-startup-id )?/, "", shown)
+    pre = (m != "") ? "[" m "] " : ""
+    printf "%-26s %-48s %s\n", pre key, shown, (d != "" ? "# " d : "")
+  }
+  /^[ \t]*$/             { d = "" }
+' "$cfg")
+
+choice=$(printf '%s\n' "$list" | dmenu -i -l 25 -p "i3 keys (Enter runs it):") || exit 0
+[ -z "$choice" ] && exit 0
+
+key=$(printf '%s' "$choice" | awk '{print $1}')
+case "$key" in \[*) exit 0 ;; esac          # mode-only keys can't run from here
+
+# run the exact command from the config line
+cmd=$(awk -v want="$key" '
+  function pretty(k) {
+    gsub(/\$mod/, "Super", k); gsub(/Mod1/, "Alt", k); gsub(/Mod4/, "Super", k)
+    gsub(/[Cc]ontrol/, "Ctrl", k); gsub(/shift/, "Shift", k); gsub(/control/, "Ctrl", k)
+    return k
+  }
+  /^[ \t]*mode "/ { inmode = 1 } /^[ \t]*}/ { inmode = 0 }
+  !inmode && /^[ \t]*bindsym / && pretty($2) == want {
+    c = $0; sub(/^[ \t]*bindsym[ \t]+[^ \t]+[ \t]+/, "", c); print c; exit
+  }' "$cfg")
+[ -n "$cmd" ] && i3-msg "$cmd" >/dev/null
+I3KEYS
+
 # Search menu ($mod+s) needs a list of engines, which isn't in the repo
 mkdir -p "$DOT/config/search"
 [[ -f "$DOT/config/search/search" ]] || cat > "$DOT/config/search/search" <<'EOF'
@@ -439,6 +506,7 @@ export PATH="$HOME/scripts:$HOME/scripts/alsa:$HOME/scripts/dragon:$HOME/scripts
 export TERMINAL=st BROWSER=firefox EDITOR=nvim
 
 [ -f ~/.Xresources ] && xrdb -merge ~/.Xresources
+setxkbmap KB_LAYOUT_PLACEHOLDER
 mpd &
 mpDris2 &
 udiskie -t &
@@ -447,6 +515,8 @@ xsetroot -cursor_name left_ptr &
 
 exec i3
 EOF
+
+sed -i "s/KB_LAYOUT_PLACEHOLDER/${KB_LAYOUT}/" "$DOT/.xinitrc"
 
 START_CMD='pgrep -x i3 >/dev/null || startx "$XDG_CONFIG_HOME/X11/xinitrc"'
 [[ -f "$DOT/.zprofile" ]] && sed -i "s#pgrep Hyprland || Hyprland#${START_CMD//&/\\&}#" "$DOT/.zprofile"
@@ -569,6 +639,12 @@ build_suckless() {
   ( cd "$dir" && rm -f -- *.o "$1"
     make && sudo make install ) || warn "$1 failed to build (needs libx11, libxft, libxinerama)."
 }
+# st: add the usual Ctrl+Shift+C / Ctrl+Shift+V copy-paste (his Ctrl+Y / Ctrl+V still work)
+if [[ -f "$WORK/st/config.h" ]] && ! grep -q 'TERMMOD,[[:space:]]*XK_V' "$WORK/st/config.h"; then
+  sed -i '/XK_Insert,[[:space:]]*selpaste/a\
+\t{ TERMMOD,              XK_C,               clipcopy,       {.i =  0} },\
+\t{ TERMMOD,              XK_V,               clippaste,      {.i =  0} },' "$WORK/st/config.h"
+fi
 if [[ $SKIP_PKGS -eq 0 ]]; then
   build_suckless st
   build_suckless dmenu
@@ -586,14 +662,45 @@ if [[ $SKIP_PKGS -eq 0 ]]; then
   xdg-user-dirs-update >/dev/null 2>&1 || true
 fi
 
+# ---------- 10b. VM: make the desktop fill the VM window ---------------------
+VIRT=$(systemd-detect-virt 2>/dev/null || true)
+if [[ $SKIP_PKGS -eq 0 && -n "$VIRT" && "$VIRT" != none ]]; then
+  if [[ -f "$SCRIPT_DIR/vm-display-fix.sh" ]]; then
+    log "Running in a VM (${VIRT}) - fixing the screen size..."
+    bash "$SCRIPT_DIR/vm-display-fix.sh" || warn "vm-display-fix.sh reported a problem."
+  else
+    warn "Running in a VM: put vm-display-fix.sh next to this script to fix the screen size."
+  fi
+fi
+
 # ---------- 11. check the result ---------------------------------------------
+# Old/wizard configs in ~/.i3 would be used if ~/.config/i3/config ever went missing
+for old in "$HOME/.i3/config" "$HOME/.i3"; do
+  if [[ -e "$old" ]]; then
+    mkdir -p "$BACKUP"; mv "$old" "$BACKUP/$(basename "$old").old-i3" 2>/dev/null || true
+    warn "Moved an old i3 config out of the way: $old"
+  fi
+done
+
+# Make sure the i3 config in place really is Brodie's (fixed) one
+if ! grep -q 'launchpolybar' "$HOME/.config/i3/config" 2>/dev/null; then
+  warn "~/.config/i3/config isn't Brodie's - copying it in again."
+  mkdir -p "$HOME/.config/i3"
+  cp -f "$I3" "$HOME/.config/i3/config"
+fi
+
 if command -v i3 >/dev/null; then
   if i3 -C -c "$HOME/.config/i3/config" >/dev/null 2>&1; then log "i3 config check: OK"
   else warn "i3 config check reported problems:"; i3 -C -c "$HOME/.config/i3/config" || true; fi
+  # If i3 is already running, restart it in place so the new keys load now
+  if [[ -n "${DISPLAY:-}" ]] && pgrep -x i3 >/dev/null; then
+    i3-msg restart >/dev/null 2>&1 && log "Restarted i3 with Brodie's keybindings."
+  fi
 fi
 
 echo
 log "Done.  WM: i3   Bar: his polybar   Terminal: st   Files: ranger   Prompt: purple powerline"
+echo "  Keyboard                  : ${KB_LAYOUT} layout.  Super+F1 inside i3 lists every keybinding."
 echo "  Backups of replaced files : ${BACKUP}"
 [[ ${#MISSING_PKGS[@]} -gt 0 ]] && echo "  Not found in repo/AUR     : ${MISSING_PKGS[*]}"
 [[ ${#FAILED_PKGS[@]}  -gt 0 ]] && echo "  Failed to install         : ${FAILED_PKGS[*]}"
